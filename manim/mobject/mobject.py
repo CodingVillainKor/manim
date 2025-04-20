@@ -3075,6 +3075,7 @@ class _AnimationBuilder:
         self.overridden_animation = None
         self.is_chaining = False
         self.methods = []
+        self.method_names = [] # added by hrim
 
         # Whether animation args can be passed
         self.cannot_pass_args = False
@@ -3110,6 +3111,7 @@ class _AnimationBuilder:
                 )
             else:
                 self.methods.append([method, method_args, method_kwargs])
+                self.method_names.append(method_name) # added by hrim
                 method(*method_args, **method_kwargs)
             return self
 
