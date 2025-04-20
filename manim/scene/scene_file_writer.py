@@ -715,6 +715,11 @@ class SceneFileWriter:
 
         partial_movies_input.close()
         output_container.close()
+        import os
+        cmd = f'ffmpeg -i {str(output_file)} -c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium -loglevel quiet -metadata encoder="libx264 via ffmpeg" {str(output_file).replace(".mp4", "_temp.mp4")}'
+        os.system(cmd)
+        cmd2 = f"mv {str(output_file).replace('.mp4', '_temp.mp4')} {str(output_file)}"
+        os.system(cmd2)
 
     def combine_to_movie(self):
         """Used internally by Manim to combine the separate
