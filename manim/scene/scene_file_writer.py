@@ -817,6 +817,10 @@ class SceneFileWriter:
 
             shutil.move(str(temp_file_path), str(movie_file_path))
             sound_file_path.unlink()
+            import os
+            cmd = f'ffmpeg -i {str(movie_file_path)} -c:v libx264 -c:a libmp3lame -pix_fmt yuv420p -crf 18 -preset medium -loglevel quiet -metadata encoder="libx264 via ffmpeg" {str(temp_file_path)}'
+            os.system(cmd)
+            shutil.move(str(temp_file_path), str(movie_file_path))
 
         self.print_file_ready_message(str(movie_file_path))
         if write_to_movie():
