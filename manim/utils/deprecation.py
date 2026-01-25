@@ -8,8 +8,8 @@ __all__ = ["deprecated", "deprecated_params"]
 import inspect
 import logging
 import re
-from collections.abc import Iterable
-from typing import Any, Callable, TypeVar, overload
+from collections.abc import Callable, Iterable
+from typing import Any, TypeVar, overload
 
 from decorator import decorate, decorator
 
@@ -250,10 +250,7 @@ def deprecated(
 
     if type(func).__name__ != "function":
         deprecate_docs(func)
-        # The following line raises this mypy error:
-        # Accessing "__init__" on an instance is unsound, since instance.__init__
-        # could be from an incompatible subclass  [misc]</pre>
-        func.__init__ = decorate(func.__init__, deprecate)  # type: ignore[misc]
+        func.__init__ = decorate(func.__init__, deprecate)
         return func
 
     func = decorate(func, deprecate)
@@ -524,10 +521,7 @@ def deprecated_params(
             arguments.
 
         """
-        used = []
-        for param in params:
-            if param in kwargs:
-                used.append(param)
+        used = [param for param in params if param in kwargs]
 
         if len(used) > 0:
             logger.warning(warning_msg(func, used))

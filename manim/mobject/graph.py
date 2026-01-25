@@ -16,7 +16,7 @@ import networkx as nx
 import numpy as np
 
 if TYPE_CHECKING:
-    from typing_extensions import TypeAlias
+    from typing import TypeAlias
 
     from manim.scene.scene import Scene
     from manim.typing import Point3D, Point3DLike
@@ -1021,10 +1021,7 @@ class GenericGraph(VMobject, metaclass=ConvertToOpenGL):
         """
         if edge_config is None:
             edge_config = self.default_edge_config.copy()
-        added_mobjects = []
-        for v in edge:
-            if v not in self.vertices:
-                added_mobjects.append(self._add_vertex(v))
+        added_mobjects = [self._add_vertex(v) for v in edge if v not in self.vertices]
         u, v = edge
 
         self._graph.add_edge(u, v)
@@ -1035,7 +1032,10 @@ class GenericGraph(VMobject, metaclass=ConvertToOpenGL):
         self._edge_config[(u, v)] = edge_config
 
         edge_mobject = edge_type(
-            self[u].get_center(), self[v].get_center(), z_index=-1, **edge_config
+            start=self[u].get_center(),
+            end=self[v].get_center(),
+            z_index=-1,
+            **edge_config,
         )
         self.edges[(u, v)] = edge_mobject
 
@@ -1543,8 +1543,8 @@ class Graph(GenericGraph):
     ):
         self.edges = {
             (u, v): edge_type(
-                self[u].get_center(),
-                self[v].get_center(),
+                start=self[u].get_center(),
+                end=self[v].get_center(),
                 z_index=-1,
                 **self._edge_config[(u, v)],
             )
@@ -1750,8 +1750,8 @@ class DiGraph(GenericGraph):
     ):
         self.edges = {
             (u, v): edge_type(
-                self[u],
-                self[v],
+                start=self[u],
+                end=self[v],
                 z_index=-1,
                 **self._edge_config[(u, v)],
             )
