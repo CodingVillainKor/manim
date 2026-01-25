@@ -3075,7 +3075,7 @@ class _AnimationBuilder:
         self.overridden_animation = None
         self.is_chaining = False
         self.methods = []
-        self.method_names = [] # added by hrim
+        self.method_names = []
 
         # Whether animation args can be passed
         self.cannot_pass_args = False
@@ -3111,7 +3111,7 @@ class _AnimationBuilder:
                 )
             else:
                 self.methods.append([method, method_args, method_kwargs])
-                self.method_names.append(method_name) # added by hrim
+                self.method_names.append(method_name)
                 method(*method_args, **method_kwargs)
             return self
 
@@ -3128,6 +3128,14 @@ class _AnimationBuilder:
         if self.overridden_animation:
             anim = self.overridden_animation
         else:
+            # if getattr(self.mobject, "_targets", None) is None:
+            #     self.mobject._targets = [self.mobject.generate_target()]
+            # else:
+            #     self.mobject._targets.append(self.mobject._targets[-1].generate_target())
+            # self.mobject.target = self.mobject._targets[-1]
+            # for i in range(len(self.method_names)):
+            #     self.__getattr__(self.method_names[i])(*self.methods[i][1], **self.methods[i][2])
+
             anim = _MethodAnimation(self.mobject, self.methods)
 
         for attr, value in self.anim_args.items():
