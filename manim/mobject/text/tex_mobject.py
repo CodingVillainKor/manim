@@ -542,6 +542,18 @@ class MathTex(SingleStringMathTex):
                 return self.id_to_vgroup_dict[match_id]
         return None
 
+    def get_parts_by_tex(
+        self, tex: str, substring: bool = True, case_sensitive: bool = True
+    ) -> VGroup:
+        result = VGroup()
+        matches = (
+            self._substring_matches if substring else self._main_matches
+        )
+        for tex_str, match_id in matches:
+            if (tex_str == tex) if case_sensitive else (tex_str.lower() == tex.lower()):
+                result.add(self.id_to_vgroup_dict[match_id])
+        return result
+
     def set_color_by_tex(
         self, tex: str, color: ParsableManimColor, **kwargs: Any
     ) -> Self:
