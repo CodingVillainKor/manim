@@ -699,7 +699,7 @@ class SceneFileWriter:
                 output_container.mux(packet)
 
         else:
-            output_stream = output_container.add_stream(
+            output_stream = output_container.add_stream_from_template(
                 template=partial_movies_stream,
             )
             if config.transparent and config.movie_file_extension == ".webm":
@@ -795,10 +795,10 @@ class SceneFileWriter:
                 output_container = av.open(
                     str(temp_file_path), mode="w", options=av_options
                 )
-                output_video_stream = output_container.add_stream(
+                output_video_stream = output_container.add_stream_from_template(
                     template=video_stream
                 )
-                output_audio_stream = output_container.add_stream(
+                output_audio_stream = output_container.add_stream_from_template(
                     template=audio_stream
                 )
 
