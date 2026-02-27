@@ -212,4 +212,10 @@ render_options = option_group(
         help="Use shaders for OpenGLVMobject stroke which are compatible with transformation matrices.",
         default=None,
     ),
+    option(
+        "--parallel",
+        is_flag=True,
+        default=None,
+        help="Render animations in parallel using multiprocessing.",
+    ),
 )

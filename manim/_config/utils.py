@@ -287,6 +287,7 @@ class ManimConfig(MutableMapping):
         "movie_file_extension",
         "notify_outdated_version",
         "output_file",
+        "parallel",
         "partial_movie_dir",
         "pixel_height",
         "pixel_width",
@@ -756,6 +757,7 @@ class ManimConfig(MutableMapping):
             "save_sections",
             "write_all",
             "disable_caching",
+            "parallel",
             "format",
             "flush_cache",
             "progress_bar",
@@ -957,6 +959,15 @@ class ManimConfig(MutableMapping):
     @save_last_frame.setter
     def save_last_frame(self, value: bool) -> None:
         self._set_boolean("save_last_frame", value)
+
+    @property
+    def parallel(self) -> bool:
+        """Whether to render animations in parallel using multiprocessing (--parallel)."""
+        return self._d["parallel"]
+
+    @parallel.setter
+    def parallel(self, value: bool) -> None:
+        self._set_boolean("parallel", value)
 
     @property
     def write_all(self) -> bool:
