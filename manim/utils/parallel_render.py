@@ -411,43 +411,116 @@ def _combine_and_finish(
 
 
 def render_parallel(scene: Scene, scene_class: type, file_path: Path) -> None:
-    """Main entry point for multiprocess parallel rendering (--parallel)."""
+    """Main entry point for multiprocess parallel rendering (--parallel).
+
+    Uses a pipelined approach: each play() call is serialized and submitted
+    to the process pool immediately upon capture, so rendering begins while
+    construct() is still discovering subsequent animations.
+    """
+    try:
+        import dill
+    except ImportError:
+        raise ImportError(
+            "The --parallel flag requires the 'dill' package. "
+            "Install it with: pip install dill"
+        )
+
     logger.info(f"Parallel rendering (multiprocess): {scene_class.__name__}")
 
-    # Phase 1: Capture (with dill serialization for cross-process transfer)
-    logger.info("Phase 1: Capturing animation states...")
     scene.setup()
-    captures = capture_play_calls(scene)
-
-    if not captures:
-        logger.info("No animations to render.")
-        scene.tear_down()
-        return
-
-    logger.info(f"Captured {len(captures)} animation(s).")
+    partial_movie_dir = _get_partial_movie_dir(scene)
 
     source_file = Path(file_path).resolve()
     source_file_parent = str(source_file.parent)
     scene_module_name = source_file.stem
     scene_class_name = scene_class.__name__
+    config_dict = _serialize_config()
 
-    # Phase 2: Multiprocess render
-    logger.info(
-        f"Phase 2: Rendering {len(captures)} animation(s) in processes..."
-    )
-    partial_files = run_parallel_workers(
-        captures,
-        scene_class_name,
-        scene_module_name,
-        source_file_parent,
-    )
+    max_workers = max(1, (os.cpu_count() or 2) - 1)
+    async_results: list = []
+    capture_count = 0
+
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(processes=max_workers) as pool:
+        original_play = scene.play
+
+        def capturing_play(*args: Any, **kwargs: Any) -> None:
+            nonlocal capture_count
+            built_animations = scene.compile_animations(*args, **kwargs)
+            combined = copy.deepcopy(
+                {
+                    "mobjects": scene.mobjects,
+                    "foreground_mobjects": scene.foreground_mobjects,
+                    "animations": built_animations,
+                }
+            )
+
+            index = capture_count
+            partial_file_path = str(
+                partial_movie_dir
+                / f"parallel_{index:05}{config['movie_file_extension']}"
+            )
+            capture_count += 1
+
+            logger.info(
+                f"Captured play() #{index}, submitting to process pool..."
+            )
+
+            blob = dill.dumps(
+                {
+                    "config_dict": config_dict,
+                    "combined_state_bytes": dill.dumps(combined),
+                    "partial_file_path": partial_file_path,
+                    "index": index,
+                    "source_file_parent": source_file_parent,
+                    "scene_class_name": scene_class_name,
+                    "scene_module_name": scene_module_name,
+                }
+            )
+
+            result = pool.apply_async(render_one_animation_mp, (blob,))
+            async_results.append(result)
+
+            original_play(*args, **kwargs)
+
+        old_original_skip = scene.renderer._original_skipping_status
+        old_skip = scene.renderer.skip_animations
+        scene.renderer._original_skipping_status = True
+        scene.renderer.skip_animations = True
+
+        scene.play = capturing_play  # type: ignore[assignment]
+        try:
+            logger.info("Phase 1+2: Capturing and rendering in pipeline...")
+            scene.construct()
+        except Exception:
+            raise
+        finally:
+            scene.play = original_play  # type: ignore[assignment]
+            scene.renderer._original_skipping_status = old_original_skip
+            scene.renderer.skip_animations = old_skip
+
+        if not async_results:
+            logger.info("No animations to render.")
+            scene.tear_down()
+            return
+
+        logger.info(
+            f"All {capture_count} play() calls captured. "
+            f"Waiting for remaining renders to complete..."
+        )
+
+        partial_files = [r.get() for r in async_results]
 
     # Phase 3: Combine
-    _combine_and_finish(scene, partial_files, "multiprocess")
+    _combine_and_finish(scene, partial_files, "multiprocess-pipelined")
 
 
 def render_multithread(scene: Scene, scene_class: type, file_path: Path) -> None:
     """Main entry point for multithreaded parallel rendering (--multithread).
+
+    Uses a pipelined approach: each play() call is submitted to the thread
+    pool immediately upon capture, so rendering begins while construct()
+    is still discovering subsequent animations.
 
     Uses threads instead of processes. Effective because the CPU-heavy work
     (Cairo rendering, PyAV H.264 encoding) happens in C extensions that
@@ -456,23 +529,73 @@ def render_multithread(scene: Scene, scene_class: type, file_path: Path) -> None
     """
     logger.info(f"Parallel rendering (multithread): {scene_class.__name__}")
 
-    # Phase 1: Capture (no serialization needed — same address space)
-    logger.info("Phase 1: Capturing animation states...")
     scene.setup()
-    captures = capture_play_calls_for_threads(scene)
+    partial_movie_dir = _get_partial_movie_dir(scene)
 
-    if not captures:
-        logger.info("No animations to render.")
-        scene.tear_down()
-        return
+    max_workers = max(1, (os.cpu_count() or 2) - 1)
+    futures: list = []
+    capture_count = 0
 
-    logger.info(f"Captured {len(captures)} animation(s).")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        original_play = scene.play
 
-    # Phase 2: Threaded render
-    logger.info(
-        f"Phase 2: Rendering {len(captures)} animation(s) in threads..."
-    )
-    partial_files = run_threaded_workers(captures, scene_class)
+        def capturing_play(*args: Any, **kwargs: Any) -> None:
+            nonlocal capture_count
+            built_animations = scene.compile_animations(*args, **kwargs)
+            combined = copy.deepcopy(
+                {
+                    "mobjects": scene.mobjects,
+                    "foreground_mobjects": scene.foreground_mobjects,
+                    "animations": built_animations,
+                }
+            )
+
+            index = capture_count
+            partial_file_path = str(
+                partial_movie_dir
+                / f"parallel_{index:05}{config['movie_file_extension']}"
+            )
+            capture_count += 1
+
+            logger.info(f"Captured play() #{index}, submitting to thread pool...")
+
+            future = executor.submit(
+                _render_one_animation_thread,
+                scene_class=scene_class,
+                combined_state=combined,
+                partial_file_path=partial_file_path,
+            )
+            futures.append(future)
+
+            original_play(*args, **kwargs)
+
+        old_original_skip = scene.renderer._original_skipping_status
+        old_skip = scene.renderer.skip_animations
+        scene.renderer._original_skipping_status = True
+        scene.renderer.skip_animations = True
+
+        scene.play = capturing_play  # type: ignore[assignment]
+        try:
+            logger.info("Phase 1+2: Capturing and rendering in pipeline...")
+            scene.construct()
+        except Exception:
+            raise
+        finally:
+            scene.play = original_play  # type: ignore[assignment]
+            scene.renderer._original_skipping_status = old_original_skip
+            scene.renderer.skip_animations = old_skip
+
+        if not futures:
+            logger.info("No animations to render.")
+            scene.tear_down()
+            return
+
+        logger.info(
+            f"All {capture_count} play() calls captured. "
+            f"Waiting for remaining renders to complete..."
+        )
+
+        partial_files = [f.result() for f in futures]
 
     # Phase 3: Combine
-    _combine_and_finish(scene, partial_files, "multithread")
+    _combine_and_finish(scene, partial_files, "multithread-pipelined")
