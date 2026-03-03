@@ -288,6 +288,7 @@ class ManimConfig(MutableMapping):
         "notify_outdated_version",
         "output_file",
         "parallel",
+        "multithread",
         "partial_movie_dir",
         "pixel_height",
         "pixel_width",
@@ -761,6 +762,7 @@ class ManimConfig(MutableMapping):
             "write_all",
             "disable_caching",
             "parallel",
+            "multithread",
             "format",
             "flush_cache",
             "progress_bar",
@@ -971,6 +973,15 @@ class ManimConfig(MutableMapping):
     @parallel.setter
     def parallel(self, value: bool) -> None:
         self._set_boolean("parallel", value)
+
+    @property
+    def multithread(self) -> bool:
+        """Whether to render animations in parallel using multithreading (--multithread)."""
+        return self._d["multithread"]
+
+    @multithread.setter
+    def multithread(self, value: bool) -> None:
+        self._set_boolean("multithread", value)
 
     @property
     def write_all(self) -> bool:

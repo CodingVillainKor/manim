@@ -122,7 +122,11 @@ def render(**kwargs: Any) -> ClickArgs | dict[str, Any]:
             try:
                 with tempconfig({}):
                     scene = SceneClass()
-                    if config.parallel:
+                    if config.multithread:
+                        from manim.utils.parallel_render import render_multithread
+
+                        render_multithread(scene, SceneClass, file)
+                    elif config.parallel:
                         from manim.utils.parallel_render import render_parallel
 
                         render_parallel(scene, SceneClass, file)

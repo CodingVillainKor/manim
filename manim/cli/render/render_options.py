@@ -218,4 +218,10 @@ render_options = option_group(
         default=None,
         help="Render animations in parallel using multiprocessing.",
     ),
+    option(
+        "--multithread",
+        is_flag=True,
+        default=None,
+        help="Render animations in parallel using multithreading (GIL-free C extensions).",
+    ),
 )

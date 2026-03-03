@@ -1,7 +1,7 @@
 """Parallel rendering for manim using the 'Render Trick' algorithm.
 
 Phase 1: Run construct() with skip_animations to capture scene state before each play().
-Phase 2: Render each animation in a separate process via multiprocessing.
+Phase 2: Render each animation in a separate process (--parallel) or thread (--multithread).
 Phase 3: Combine partial movie files into the final video.
 """
 
@@ -11,17 +11,10 @@ import copy
 import multiprocessing
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-try:
-    import dill
-except ImportError:
-    raise ImportError(
-        "The --parallel flag requires the 'dill' package. "
-        "Install it with: pip install dill"
-    )
 
 from .. import config, logger
 from ..animation.animation import Wait
@@ -30,15 +23,24 @@ from ..utils.file_ops import guarantee_existence
 if TYPE_CHECKING:
     from ..scene.scene import Scene
 
-__all__ = ["render_parallel"]
+__all__ = ["render_parallel", "render_multithread"]
 
 
 @dataclass
 class PlayCapture:
-    """One captured play() call."""
+    """One captured play() call (serialized for multiprocessing)."""
 
     index: int
     combined_state_bytes: bytes  # dill-serialized {mobjects, foreground_mobjects, animations}
+    partial_file_path: str
+
+
+@dataclass
+class PlayCaptureThread:
+    """One captured play() call (raw dict for multithreading)."""
+
+    index: int
+    combined_state: dict  # deepcopy'd {mobjects, foreground_mobjects, animations}
     partial_file_path: str
 
 
@@ -47,33 +49,23 @@ class PlayCapture:
 # ---------------------------------------------------------------------------
 
 
-def capture_play_calls(scene: Scene) -> list[PlayCapture]:
-    """Run construct() in skip mode, capturing state before each play().
-
-    Returns a list of PlayCapture objects, one per play() call.
-    """
-    captures: list[PlayCapture] = []
-    original_play = scene.play
-
-    # Determine partial movie directory for output file naming
+def _get_partial_movie_dir(scene: Scene) -> Path:
+    """Get the partial movie directory from the scene's file writer."""
     file_writer = scene.renderer.file_writer
     if not hasattr(file_writer, "partial_movie_directory"):
         raise RuntimeError(
             "Parallel rendering requires write_to_movie=True. "
             "Cannot determine partial movie directory."
         )
-    partial_movie_dir = file_writer.partial_movie_directory
+    return file_writer.partial_movie_directory
+
+
+def _run_capture_loop(scene: Scene, make_capture: Any) -> None:
+    """Run construct() in skip mode, calling make_capture for each play()."""
+    original_play = scene.play
 
     def capturing_play(*args: Any, **kwargs: Any) -> None:
-        index = len(captures)
-
-        # Build animations from raw args (converts _AnimationBuilder → Animation).
-        # This is the same call that compile_animation_data() makes internally.
-        # compile_animations is side-effect free on the scene.
         built_animations = scene.compile_animations(*args, **kwargs)
-
-        # Deepcopy scene state AND animations TOGETHER so that shared references
-        # between scene.mobjects and animation.mobject are preserved in the copy.
         combined = copy.deepcopy(
             {
                 "mobjects": scene.mobjects,
@@ -81,30 +73,14 @@ def capture_play_calls(scene: Scene) -> list[PlayCapture]:
                 "animations": built_animations,
             }
         )
-
-        partial_file_path = str(
-            partial_movie_dir
-            / f"parallel_{index:05}{config['movie_file_extension']}"
-        )
-
-        capture = PlayCapture(
-            index=index,
-            combined_state_bytes=dill.dumps(combined),
-            partial_file_path=partial_file_path,
-        )
-        captures.append(capture)
-
-        # Run the REAL play() in skip mode so scene state advances correctly.
-        # compile_animations will be called again inside, which is safe.
+        make_capture(combined)
         original_play(*args, **kwargs)
 
-    # Enable skip mode on the renderer (same mechanism as -s flag)
     old_original_skip = scene.renderer._original_skipping_status
     old_skip = scene.renderer.skip_animations
     scene.renderer._original_skipping_status = True
     scene.renderer.skip_animations = True
 
-    # Monkey-patch play and run construct
     scene.play = capturing_play  # type: ignore[assignment]
     try:
         scene.construct()
@@ -115,6 +91,66 @@ def capture_play_calls(scene: Scene) -> list[PlayCapture]:
         scene.renderer._original_skipping_status = old_original_skip
         scene.renderer.skip_animations = old_skip
 
+
+def capture_play_calls(scene: Scene) -> list[PlayCapture]:
+    """Run construct() in skip mode, capturing state before each play().
+
+    Returns a list of PlayCapture objects with dill-serialized state
+    (for multiprocessing).
+    """
+    try:
+        import dill
+    except ImportError:
+        raise ImportError(
+            "The --parallel flag requires the 'dill' package. "
+            "Install it with: pip install dill"
+        )
+
+    captures: list[PlayCapture] = []
+    partial_movie_dir = _get_partial_movie_dir(scene)
+
+    def make_capture(combined: dict) -> None:
+        index = len(captures)
+        partial_file_path = str(
+            partial_movie_dir
+            / f"parallel_{index:05}{config['movie_file_extension']}"
+        )
+        captures.append(
+            PlayCapture(
+                index=index,
+                combined_state_bytes=dill.dumps(combined),
+                partial_file_path=partial_file_path,
+            )
+        )
+
+    _run_capture_loop(scene, make_capture)
+    return captures
+
+
+def capture_play_calls_for_threads(scene: Scene) -> list[PlayCaptureThread]:
+    """Run construct() in skip mode, capturing state before each play().
+
+    Returns a list of PlayCaptureThread objects with raw deepcopy'd dicts
+    (no serialization overhead for same-process threading).
+    """
+    captures: list[PlayCaptureThread] = []
+    partial_movie_dir = _get_partial_movie_dir(scene)
+
+    def make_capture(combined: dict) -> None:
+        index = len(captures)
+        partial_file_path = str(
+            partial_movie_dir
+            / f"parallel_{index:05}{config['movie_file_extension']}"
+        )
+        captures.append(
+            PlayCaptureThread(
+                index=index,
+                combined_state=combined,
+                partial_file_path=partial_file_path,
+            )
+        )
+
+    _run_capture_loop(scene, make_capture)
     return captures
 
 
@@ -136,8 +172,8 @@ def _serialize_config() -> dict[str, Any]:
     return result
 
 
-def render_one_animation(worker_args_bytes: bytes) -> str:
-    """Worker function: render a single animation to a partial movie file.
+def render_one_animation_mp(worker_args_bytes: bytes) -> str:
+    """Worker function (multiprocessing): render a single animation to a partial movie file.
 
     Receives all arguments as a single dill-serialized blob to bypass
     pickle limitations in multiprocessing's spawn context.
@@ -189,6 +225,21 @@ def render_one_animation(worker_args_bytes: bytes) -> str:
 
     # Use pre-built animations (already converted from _AnimationBuilder)
     animations = combined["animations"]
+    _setup_scene_for_render(scene, animations)
+
+    renderer = scene.renderer
+    file_writer = renderer.file_writer
+
+    # Ensure target directory exists
+    guarantee_existence(Path(partial_file_path).parent)
+
+    _render_to_partial_file(scene, renderer, file_writer, partial_file_path)
+
+    return partial_file_path
+
+
+def _setup_scene_for_render(scene: Scene, animations: list) -> None:
+    """Set up scene state for rendering pre-built animations."""
     scene.animations = animations
     scene.add_mobjects_from_animations(animations)
     scene.last_t = 0
@@ -197,18 +248,17 @@ def render_one_animation(worker_args_bytes: bytes) -> str:
     scene.static_mobjects = []
     scene.duration = scene.get_run_time(animations)
 
-    # Handle static Wait
     if len(animations) == 1 and isinstance(animations[0], Wait):
         if not scene.should_update_mobjects():
             animations[0].is_static_wait = True
 
-    renderer = scene.renderer
-    file_writer = renderer.file_writer
 
-    # Ensure target directory exists
+def _render_to_partial_file(
+    scene: Scene, renderer: Any, file_writer: Any, partial_file_path: str
+) -> None:
+    """Render the current scene animations to a partial movie file."""
     guarantee_existence(Path(partial_file_path).parent)
 
-    # Open stream directly to the target partial file
     file_writer.open_partial_movie_stream(file_path=partial_file_path)
 
     scene.begin_animations()
@@ -222,8 +272,6 @@ def render_one_animation(worker_args_bytes: bytes) -> str:
 
     file_writer.close_partial_movie_stream()
 
-    return partial_file_path
-
 
 def run_parallel_workers(
     captures: list[PlayCapture],
@@ -236,6 +284,8 @@ def run_parallel_workers(
 
     Returns the ordered list of partial movie file paths.
     """
+    import dill
+
     if max_workers is None:
         max_workers = max(1, (os.cpu_count() or 2) - 1)
 
@@ -261,8 +311,76 @@ def run_parallel_workers(
 
     partial_files: list[str] = []
     with ctx.Pool(processes=min(max_workers, len(captures))) as pool:
-        results = pool.map(render_one_animation, worker_blobs)
+        results = pool.map(render_one_animation_mp, worker_blobs)
         partial_files = list(results)
+
+    return partial_files
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 (Multithread): Worker
+# ---------------------------------------------------------------------------
+
+
+def _render_one_animation_thread(
+    scene_class: type,
+    combined_state: dict,
+    partial_file_path: str,
+) -> str:
+    """Thread worker: render a single animation to a partial movie file.
+
+    Each thread creates its own Scene/Renderer/Camera/FileWriter instances.
+    The heavy lifting (Cairo drawing, PyAV encoding) happens in C extensions
+    that release the GIL, enabling true parallelism across threads.
+    """
+    # Deepcopy so this thread has fully independent mobject/animation objects
+    combined = copy.deepcopy(combined_state)
+
+    # Fresh Scene instance → own Renderer, Camera, pixel_array, FileWriter
+    scene = scene_class()
+    scene.setup()
+
+    scene.mobjects = combined["mobjects"]
+    scene.foreground_mobjects = combined["foreground_mobjects"]
+
+    animations = combined["animations"]
+    _setup_scene_for_render(scene, animations)
+
+    renderer = scene.renderer
+    file_writer = renderer.file_writer
+
+    _render_to_partial_file(scene, renderer, file_writer, partial_file_path)
+
+    return partial_file_path
+
+
+def run_threaded_workers(
+    captures: list[PlayCaptureThread],
+    scene_class: type,
+    max_workers: int | None = None,
+) -> list[str]:
+    """Dispatch captured animations to worker threads.
+
+    Returns the ordered list of partial movie file paths.
+    """
+    if max_workers is None:
+        max_workers = max(1, (os.cpu_count() or 2) - 1)
+
+    num_workers = min(max_workers, len(captures))
+
+    futures = []
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        for capture in captures:
+            future = executor.submit(
+                _render_one_animation_thread,
+                scene_class=scene_class,
+                combined_state=capture.combined_state,
+                partial_file_path=capture.partial_file_path,
+            )
+            futures.append(future)
+
+        # Collect results in submission order (preserves animation ordering)
+        partial_files = [f.result() for f in futures]
 
     return partial_files
 
@@ -272,14 +390,31 @@ def run_parallel_workers(
 # ---------------------------------------------------------------------------
 
 
+def _combine_and_finish(
+    scene: Scene, partial_files: list[str], mode_label: str
+) -> None:
+    """Phase 3: Combine partial movie files into the final video."""
+    logger.info("Phase 3: Combining partial files...")
+    file_writer = scene.renderer.file_writer
+
+    file_writer.partial_movie_files = partial_files
+    if file_writer.sections:
+        file_writer.sections[-1].partial_movie_files = partial_files
+
+    file_writer.combine_to_movie()
+    scene.tear_down()
+
+    logger.info(
+        f"Rendered {scene.__class__.__name__}\n"
+        f"Played {len(partial_files)} animations ({mode_label})"
+    )
+
+
 def render_parallel(scene: Scene, scene_class: type, file_path: Path) -> None:
-    """Main entry point for parallel rendering.
+    """Main entry point for multiprocess parallel rendering (--parallel)."""
+    logger.info(f"Parallel rendering (multiprocess): {scene_class.__name__}")
 
-    Called from commands.py when --parallel is set.
-    """
-    logger.info(f"Parallel rendering: {scene_class.__name__}")
-
-    # Phase 1: Capture
+    # Phase 1: Capture (with dill serialization for cross-process transfer)
     logger.info("Phase 1: Capturing animation states...")
     scene.setup()
     captures = capture_play_calls(scene)
@@ -291,15 +426,14 @@ def render_parallel(scene: Scene, scene_class: type, file_path: Path) -> None:
 
     logger.info(f"Captured {len(captures)} animation(s).")
 
-    # Compute module import path for workers
     source_file = Path(file_path).resolve()
     source_file_parent = str(source_file.parent)
     scene_module_name = source_file.stem
     scene_class_name = scene_class.__name__
 
-    # Phase 2: Parallel render
+    # Phase 2: Multiprocess render
     logger.info(
-        f"Phase 2: Rendering {len(captures)} animation(s) in parallel..."
+        f"Phase 2: Rendering {len(captures)} animation(s) in processes..."
     )
     partial_files = run_parallel_workers(
         captures,
@@ -309,19 +443,36 @@ def render_parallel(scene: Scene, scene_class: type, file_path: Path) -> None:
     )
 
     # Phase 3: Combine
-    logger.info("Phase 3: Combining partial files...")
-    file_writer = scene.renderer.file_writer
+    _combine_and_finish(scene, partial_files, "multiprocess")
 
-    # Set partial_movie_files so combine_to_movie() picks them up
-    file_writer.partial_movie_files = partial_files
-    if file_writer.sections:
-        file_writer.sections[-1].partial_movie_files = partial_files
 
-    file_writer.combine_to_movie()
+def render_multithread(scene: Scene, scene_class: type, file_path: Path) -> None:
+    """Main entry point for multithreaded parallel rendering (--multithread).
 
-    scene.tear_down()
+    Uses threads instead of processes. Effective because the CPU-heavy work
+    (Cairo rendering, PyAV H.264 encoding) happens in C extensions that
+    release the GIL, enabling true parallelism without the overhead of
+    cross-process serialization.
+    """
+    logger.info(f"Parallel rendering (multithread): {scene_class.__name__}")
 
+    # Phase 1: Capture (no serialization needed — same address space)
+    logger.info("Phase 1: Capturing animation states...")
+    scene.setup()
+    captures = capture_play_calls_for_threads(scene)
+
+    if not captures:
+        logger.info("No animations to render.")
+        scene.tear_down()
+        return
+
+    logger.info(f"Captured {len(captures)} animation(s).")
+
+    # Phase 2: Threaded render
     logger.info(
-        f"Rendered {scene_class.__name__}\n"
-        f"Played {len(captures)} animations (parallel)"
+        f"Phase 2: Rendering {len(captures)} animation(s) in threads..."
     )
+    partial_files = run_threaded_workers(captures, scene_class)
+
+    # Phase 3: Combine
+    _combine_and_finish(scene, partial_files, "multithread")
