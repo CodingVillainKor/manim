@@ -1699,6 +1699,40 @@ class VMobject(Mobject):
             tuple(it.chain(*(sm.get_anchors() for sm in self.get_family())))
         )
 
+    def get_boundary_point(self, direction: Vector3DLike) -> Point3D:
+        direction = np.array(direction, dtype=float)
+        if np.allclose(direction, 0):
+            return self.get_center()
+        n_samples = 64
+        sample_ts = np.linspace(0, 1, n_samples)
+        all_points = []
+        for sm in self.get_family():
+            if sm.has_no_points():
+                continue
+            all_points.extend(
+                sm.point_from_proportion(t) for t in sample_ts
+            )
+        if len(all_points) == 0:
+            return self.get_center()
+        all_points = np.array(all_points)
+        # Ray-intersection: find the point whose direction from the
+        # overall center best aligns with the requested direction.
+        center = self.get_center()
+        offsets = all_points - center
+        norms = np.linalg.norm(offsets, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-10)
+        normalized = offsets / norms
+        # Among points aligned with direction, pick the outermost
+        alignment = np.dot(normalized, direction)
+        # Only consider points reasonably aligned (top 20% of alignment)
+        threshold = np.max(alignment) - 0.1
+        mask = alignment >= threshold
+        # Among those, pick the one furthest from center in that direction
+        projections = np.dot(all_points, direction)
+        projections[~mask] = -np.inf
+        index = np.argmax(projections)
+        return all_points[index]
+
     def get_arc_length(self, sample_points_per_curve: int | None = None) -> float:
         """Return the approximated length of the whole curve.
 
