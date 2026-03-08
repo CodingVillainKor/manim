@@ -1703,35 +1703,35 @@ class VMobject(Mobject):
         direction = np.array(direction, dtype=float)
         if np.allclose(direction, 0):
             return self.get_center()
+        if self.has_no_points():
+            # VGroup: ray-AABB intersection
+            all_points = self.get_points_defining_boundary()
+            if len(all_points) == 0:
+                return self.get_center()
+            center = self.get_center()
+            mins = np.min(all_points, axis=0)
+            maxs = np.max(all_points, axis=0)
+            half = (maxs - mins) / 2
+            d_norm = direction / np.linalg.norm(direction)
+            t_min = float("inf")
+            for i in range(3):
+                if abs(d_norm[i]) > 1e-10:
+                    t_min = min(t_min, half[i] / abs(d_norm[i]))
+            if t_min == float("inf"):
+                return center
+            return center + d_norm * t_min
+        # Single VMobject: sample outline, ray-intersection from center
         n_samples = 64
-        sample_ts = np.linspace(0, 1, n_samples)
-        all_points = []
-        for sm in self.get_family():
-            if sm.has_no_points():
-                continue
-            all_points.extend(
-                sm.point_from_proportion(t) for t in sample_ts
-            )
-        if len(all_points) == 0:
-            return self.get_center()
-        all_points = np.array(all_points)
-        # Ray-intersection: find the point whose direction from the
-        # overall center best aligns with the requested direction.
+        points = np.array(
+            [self.point_from_proportion(t) for t in np.linspace(0, 1, n_samples)]
+        )
         center = self.get_center()
-        offsets = all_points - center
+        offsets = points - center
         norms = np.linalg.norm(offsets, axis=1, keepdims=True)
         norms = np.maximum(norms, 1e-10)
         normalized = offsets / norms
-        # Among points aligned with direction, pick the outermost
-        alignment = np.dot(normalized, direction)
-        # Only consider points reasonably aligned (top 20% of alignment)
-        threshold = np.max(alignment) - 0.1
-        mask = alignment >= threshold
-        # Among those, pick the one furthest from center in that direction
-        projections = np.dot(all_points, direction)
-        projections[~mask] = -np.inf
-        index = np.argmax(projections)
-        return all_points[index]
+        index = np.argmax(np.dot(normalized, direction))
+        return points[index]
 
     def get_arc_length(self, sample_points_per_curve: int | None = None) -> float:
         """Return the approximated length of the whole curve.
